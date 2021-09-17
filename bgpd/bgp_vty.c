@@ -17039,6 +17039,134 @@ static void bgp_config_write_family(struct vty *vty, struct bgp *bgp, afi_t afi,
 	vty_endframe(vty, " exit-address-family\n");
 }
 
+static int bgp_ovs_process_local_vni(int add,
+                                     struct in_addr vtep_ip,
+                                     vni_t vni,
+                                     vrf_id_t vrf_id)
+{
+    struct bgp *bgp;
+    vrf_id_t tenant_vrf_id = VRF_DEFAULT;
+    struct in_addr mcast_grp = {INADDR_ANY};
+    ifindex_t svi_ifindex = 0;
+
+    bgp = bgp_lookup_by_vrf_id(vrf_id);
+    if (!bgp)
+        return 0;
+
+    if (add)
+        return bgp_evpn_local_vni_add(bgp,
+                                      vni,
+                                      vtep_ip.s_addr != INADDR_ANY ? vtep_ip : bgp->router_id,
+                                      tenant_vrf_id,
+                                      mcast_grp,
+				      svi_ifindex);
+    else
+        return bgp_evpn_local_vni_del(bgp, vni);
+}
+
+static int bgp_ovs_process_local_macip(int add, vni_t vni,
+                                       struct ethaddr* mac,
+                                       struct ipaddr *ip,
+                                       vrf_id_t vrf_id)
+{
+    struct bgp *bgp;
+    uint8_t flags = ZEBRA_MACIP_TYPE_STICKY;
+    uint32_t seqnum = 0;
+    esi_t esi = {0};
+    int state = ZEBRA_NEIGH_ACTIVE;
+
+    bgp = bgp_lookup_by_vrf_id(vrf_id);
+    if (!bgp)
+        return 0;
+
+    if (add)
+        return bgp_evpn_local_macip_add(bgp, vni, mac, ip, flags, seqnum, &esi);
+    else
+        return bgp_evpn_local_macip_del(bgp, vni, mac, ip, state);
+}
+
+DEFUN (vxlan_tunnel_port,
+       vxlan_tunnel_port_cmd,
+       "vxlan local <A.B.C.D|X:X::X:X> vni (0-16777215) [vrf (0-65535)]",
+       "vxlan config\n"
+           "tunnel local config\n"
+       "IP address\n"
+       "vni\n"
+           "vni\n"
+           "vrf\n"
+       "vrf id\n")
+{
+    int rc;
+    int idx_addr = 2;
+    int idx_vni = 4;
+    int idx_vrf = 6;
+
+    struct rfapi_ip_addr ipaddr;
+
+    uint32_t vni = 0;
+    uint32_t vrf = VRF_DEFAULT;
+    vni = strtoul((argv[idx_vni]->arg), NULL, 10);
+
+    if(argc==7)
+        vrf = strtoul((argv[idx_vrf]->arg), NULL, 10);
+
+    /*
+     * Get addr
+     *
+     */
+    if ((rc = rfapiCliGetRfapiIpAddr(vty, argv[idx_addr]->arg, &ipaddr)))
+        return rc;
+
+    bgp_ovs_process_local_vni(1, ipaddr.addr.v4, vni, vrf);
+
+    return CMD_SUCCESS;
+}
+
+DEFUN (vxlan_local_macip,
+       vxlan_local_macip_cmd,
+       "vxlan local mac YY:YY:YY:YY:YY:YY ip <A.B.C.D|X:X::X:X> vni (0-16777215) [vrf (0-65535)]",
+       "vxlan config\n"
+       "tunnel local config\n"
+       "mac\n"
+       "local MAC address\n"
+       "ip\n"
+       "IP address\n"
+       "vni\n"
+       "vni id value\n"
+       "vrf\n"
+       "vrf id\n")
+{
+    int idx_addr = 5;
+    int idx_mac = 3;
+    int idx_vni = 7;
+    int idx_vrf = 9;
+    struct ethaddr mac;
+    uint32_t vni = 0;
+    uint32_t vrf = VRF_DEFAULT;
+    struct ipaddr ipaddr;
+
+    vni = strtoul((argv[idx_vni]->arg), NULL, 10);
+
+    if(argc==10)
+        vrf = strtoul((argv[idx_vrf]->arg), NULL, 10);
+
+    /* Get addr */
+    if (str2ipaddr(argv[idx_addr]->arg, &ipaddr)){
+        vty_out(vty, "Bad IP address \"%s\"\n", argv[idx_addr]->arg);
+        return CMD_WARNING_CONFIG_FAILED;
+    }
+
+    /* get MAC address*/
+    if (rfapiStr2EthAddr(argv[idx_mac]->arg, &mac)) {
+        vty_out(vty, "Bad mac address \"%s\"\n", argv[idx_mac]->arg);
+            return CMD_WARNING_CONFIG_FAILED;
+    }
+
+    bgp_ovs_process_local_macip(1, vni, &mac, &ipaddr, vrf);
+
+    return CMD_SUCCESS;
+}
+
 int bgp_config_write(struct vty *vty)
 {
 	struct bgp *bgp;
@@ -17647,6 +17775,10 @@ void bgp_vty_init(void)
 	/* "bgp local-mac" hidden commands. */
 	install_element(CONFIG_NODE, &bgp_local_mac_cmd);
 	install_element(CONFIG_NODE, &no_bgp_local_mac_cmd);
+ 
+        /* "vxlan local" */
+        install_element(CONFIG_NODE, &vxlan_tunnel_port_cmd);
+        install_element(CONFIG_NODE, &vxlan_local_macip_cmd);
 
 	/* "bgp suppress-fib-pending" global */
 	install_element(CONFIG_NODE, &bgp_global_suppress_fib_pending_cmd);
